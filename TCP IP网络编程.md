@@ -1098,7 +1098,7 @@ getsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (void*) &optval, &opt_len);
 
 - **利用 sigaction函数进行信号处理**
 
-  ​		“sigaction函数在UNIX系列的不同操作系统中可能存在区别，但sigaction函数完全相同。”
+  ​		“signal函数在UNIX系列的不同操作系统中可能存在区别，但sigaction函数完全相同。”
 
   ~~~c++
   #include <signal.h>
@@ -1371,5 +1371,86 @@ getsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (void*) &optval, &opt_len);
 
 ### 第十三章 多种I/O函数
 
-#### 13.1 sand & recv函数
+#### 13.1 send & recv函数
 
+- **Linux 中的 send & recv**
+
+  ~~~c++
+  #include <sys/socket.h>
+  ssize_t send(int sockfd, const void *buf, size_t nbytes, int flags);
+  /*
+  成功时返回发送的字节数，失败时返回 -1
+  sockfd: 表示与数据传输对象的连接的套接字和文件描述符
+  buf: 保存带传输数据的缓冲地址值
+  nbytes: 待传输字节数
+  flags: 传输数据时指定的可选项信息
+  */
+  
+  #include <sys/socket.h>
+  ssize_t recv(int sockfd, void *buf, size_t nbytes, int flags);
+  /*
+  成功时返回接收的字节数（收到 EOF 返回 0），失败时返回 -1
+  sockfd: 表示数据接受对象的连接的套接字文件描述符
+  buf: 保存接受数据的缓冲地址值
+  nbytes: 可接收的最大字节数
+  flags: 接收数据时指定的可选项参数
+  */
+  ~~~
+
+  ​		send 和 recv 函数都是最后一个参数是收发数据的可选项，该选项可以用位或（bit OR）运算符（**| 运算符**）同时传递多个信息。
+
+  | 可选项（Option） | 含义                                                         | send | recv |
+  | ---------------- | ------------------------------------------------------------ | ---- | ---- |
+  | MSG_OOB          | 用于传输带外数据（Out-of-band data）                         | O    | O    |
+  | MSG_PEEK         | 验证输入缓冲中是否存在接受的数据                             | X    | O    |
+  | MSG_DONTROUTE    | 数据传输过程中不参照本地路由（Routing）表，在本地（Local）网络中寻找目的地 | O    | X    |
+  | MSG_DONTWAIT     | 调用 I/O 函数时不阻塞，用于使用非阻塞（Non-blocking）I/O     | O    | O    |
+  | MSG_WAITALL      | 防止函数返回，直到接收到全部请求的字节数                     | X    | O    |
+
+- **MSG_OOB：发送紧急消息**
+
+  MSG_OOB 可选项用于**创建特殊发送方法和通道以发送紧急消息**。
+
+  **==源码分析oob_send.c P223；oob_recv.c  P224==**
+
+  ~~~c++
+  fcntl(recv_sock, F_SETOWN, getpid());
+  //文件描述符 recv_sock 指向的套接字引发的 SIGURG 信号处理进程变为 getpid 函数返回值用作 ID 进程.
+  //处理 SIGURG 信号时必须指定处理信号所用的进程，而 getpid 返回的是调用此函数的进程 ID
+  ~~~
+
+  >通过 MSG_OOB 可选项传递数据时只返回 1 个字节，而且也不快。
+
+  的确，通过 MSG_OOB 并不会加快传输速度，而通过信号处理函数 urg_handler 也只能读取一个字节。**剩余数据只能通过未设置 MSG_OOB 可选项的普通输入函数读取**。因为 TCP 不存在真正意义上的「带外数据」。实际上，MSG_OOB 中的 OOB 指的是 Out-of-band ，而「带外数据」的含义是：
+
+  >通过去**完全不同的通信路径**传输的数据
+
+  即真正意义上的 Out-of-band 需要通过单独的通信路径高速传输数据，但是 TCP 不另外提供，只利用 TCP 的紧急模式（Urgent mode）进行传输。
+
+- **紧急模式工作原理**
+
+  ​		MSG_OOB 的真正意义在于**督促数据接收对象尽快处理数据。**这是紧急模式的全部内容，而 TCP 「保持传输顺序」的传输特性依然成立。TCP 的紧急消息无法保证及时到达，但是可以**要求急救**。
+
+  MSG_OOB 可选项状态下的数据传输过程，如图：
+
+  ![](https://i.loli.net/2019/01/26/5c4be222845cc.png)
+
+  ​		如果缓冲最左端的位置视作偏移量 0 。字符 0 保存于偏移量 2 的位置。另外，字符 0 右侧偏移量为 3 的位置存有紧急指针（Urgent Pointer）。**紧急指针指向紧急消息的下一个位置（偏移量加一）**，同时向对方主机传递一下信息：**紧急指针指向的偏移量为 3 之前的部分就是紧急消息。**
+
+  ​		**实际上只用了一个字节表示紧急消息。**这一点可以通过图中用于传输数据的 TCP 数据包（段）的结构看得更清楚，如图：
+
+  ![](https://i.loli.net/2019/01/26/5c4beeae46b4e.png)
+
+  TCP 数据包实际包含更多信息。TCP 头部包含如下两种信息：
+
+  - URG=1：载有紧急消息的数据包
+
+  - URG指针：紧急指针位于偏移量为 3 的位置。
+
+    ​	指定 MSG_OOB 选项的数据包本身就是紧急数据包，并通过紧急指针表示紧急消息所在的位置。
+
+  **紧急消息的意义在于督促消息处理，而非紧急传输形式受限的信息。**
+
+- **检查输入缓冲**
+
+  
